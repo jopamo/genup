@@ -45,16 +45,11 @@ declare -i VERBOSITY=1
 PREFIXSTRING="* "
 SHOWPREFIX="${GREEN_TEXT}${PREFIXSTRING}${RESET_ATTS}"
 SHOWSUFFIX=""
-# following variable is conformed on installation by ebuild
-# (to reflect setting of "buildkernel" USE flag)
-USE_BUILDKERNEL=false
 VERBOSITYFLAG=""
 ASKFLAG=""
 ALERTFLAG=""
 EMERGE=""
 EMERGEARGS=""
-BUILDKERNEL=""
-BUILDKERNELARGS=""
 PUMP=""
 NOPUMP="-distcc -distcc-pump"
 FALLBACK_SENTINEL="/tmp/.full-emptytree-emerge-performed"
@@ -204,6 +199,8 @@ rebuild_external_modules_if_necessary() {
             	warning "Continuing..."
         	fi
     	fi
+    else
+    	show "Not building modules!"
     fi
 }
 rebuild_packages_depending_on_stale_libraries() {
@@ -347,6 +344,8 @@ install_new_kernel() {
 		grub-install /dev/sda || echo "failed installing pc bios"
 		grub-install --efi-directory=/boot --removable || echo "failed installing removable efi bios"
 		grub-install --efi-directory=/boot || echo "failed installing efi bios"
+	else
+		show "Not building kernel!"
 	fi
 }
 update_environment() {
@@ -376,24 +375,6 @@ rebuild_where_missing_libraries_detected() {
 }
 display_final_status() {
     show
-    if ((KERNELBUILT==1)); then
-        if ((KERNELDEPLOYED==1)); then
-            show "A new kernel has been built successfully, and deployed to your"
-            show "EFI system partition; it will be used from the next reboot."
-        else
-            show "An updated kernel has been successfully built in the staging area!"
-            show "You can install it to your EFI system partition by issuing:"
-            show "  buildkernel --copy-from-staging"
-        fi
-    elif ((ARG_KERNEL_UPGRADE==0)); then
-        if buildkernel --is-new-kernel-available; then
-            warning "You are currently running with an older kernel"
-            warning "When ready, ensure you have copied the new version"
-            warning "to the EFI system partition"
-            warning "(using buildkernel --copy-from-staging), and then reboot to"
-            warning "start using it."
-        fi
-    fi
     if ((NEEDSDISPATCHCONF==2)); then
         # double-check that the user resolved everything earlier
         check_if_dispatch_conf_needs_to_be_run
@@ -419,18 +400,10 @@ Options:
   -a, --ask             turns on interactive mode: you must confirm key actions
   -A, --alert           sound terminal bell when interaction required
                         (selecting this also automatically selects --ask)
-  -b, --buildkernel-args=ARGS
-                        pass provided additional ARGS to the initial
-                        (staging) buildkernel invocation (requires buildkernel
-                        USE flag to have been set)
   -c, --dispatch-conf   run dispatch-conf, even if in non-interactive mode
   -C, --no-custom-updaters
                         do not run any custom updaters from the
                         /etc/genup/updaters.d directory
-  -d, --deploy-from-staging
-                        if an updated kernel is successfully built in staging,
-                        afterwards try to copy it onto the EFI system partition
-                        (requires buildkernel USE flag to have been set)
   -e, --emerge-args=ARGS
                         pass provided additional ARGS to the main emerge
                         e.g., use --emerge-args='--autounmask-write' to
@@ -474,19 +447,6 @@ display_usage_message_and_bail_out() {
     cleanup_and_exit_with_code 1
 }
 internal_consistency_option_checks() {
-    # following not exhaustive, just some more obvious snafus
-    local KERNMSG="--kernel-upgrade"
-    if ! "${USE_BUILDKERNEL}"; then
-        KERNMSG="buildkernel USE flag unset"
-    fi
-    if ((ARG_KERNEL_UPGRADE==1)) || ! "${USE_BUILDKERNEL}"; then
-        if [[ -n "${BUILDKERNELARGS}" ]]; then
-            display_usage_message_and_bail_out "cannot specify --buildkernel-args with ${KERNMSG}"
-        fi
-        if ((ARG_DEPLOYFROMSTAGING==1)); then
-            display_usage_message_and_bail_out "cannot specify --deploy-from-staging with ${KERNMSG}"
-        fi
-    fi
     if ((ADJUSTMENT<-20 || ADJUSTMENT>19)); then
             display_usage_message_and_bail_out "must have -20 <= build niceness adjustment <= 19"
     fi
@@ -512,7 +472,7 @@ process_command_line_options() {
     declare -i RC
     set +e
         # error trapping off, as we want to handle errors
-        TEMP="$(getopt -o aAb:cCde:EFhikmMnNpr:SvVx: --long ask,alert,buildkernel-args:,dispatch-conf,no-custom-updaters,deploy-from-staging,emerge-args:,no-fixups,help,ignore-required-changes,keep-old-distfiles,kernel-upgrade,no-nocache,no-perl-cleaner,adjustment:,verbose,version: -n "${PROGNAME}" -- "${@}")"
+        TEMP="$(getopt -o aAb:cCde:EFhikmMnNpr:SvVx: --long ask,alert,dispatch-conf,no-custom-updaters,deploy-from-staging,emerge-args:,no-fixups,help,ignore-required-changes,keep-old-distfiles,kernel-upgrade,no-nocache,no-perl-cleaner,adjustment:,verbose,version: -n "${PROGNAME}" -- "${@}")"
         RC="${?}"
     set -e
     if ((RC!=0)); then
@@ -525,11 +485,6 @@ process_command_line_options() {
         case "${1}" in
             -a|--ask) ARG_ASK=1 ; shift ;;
             -A|--alert) ARG_ALERT=1 ; ARG_ASK=1 ; shift ;;
-            -b|--buildkernel-args)
-                case "${2}" in
-                    "") shift 2 ;;
-                    *) BUILDKERNELARGS="${2}" ; shift 2 ;;
-                esac ;;
             -c|--dispatch-conf) ARG_DISPATCHCONF=1 ; shift ;;
             -C|--no-custom-updaters) ARG_NO_CUSTOM_UPDATERS=1 ; shift ;;
             -d|--deploy-from-staging) ARG_DEPLOYFROMSTAGING=1 ; shift ;;
@@ -564,9 +519,9 @@ process_command_line_options() {
         print_version
         cleanup_and_exit_with_code 0
     fi
-    # setup emerge, buildkernel commands with specified niceness
+    # setup emerge commands with specified niceness
     EMERGE="nice -n ${ADJUSTMENT} emerge"
-    BUILDKERNEL="nice -n ${ADJUSTMENT} buildkernel"
+
     # set verbosity
     if ((ARG_VERBOSE==1)); then
         VERBOSITY+=1
@@ -582,10 +537,6 @@ process_command_line_options() {
         ALERTFLAG="--alert"
     else
         suppress_alert
-    fi
-    # force 'no kernel upgrade' mode if buildkernel USE flag not set
-    if ! "${USE_BUILDKERNEL}"; then
-        ARG_KERNEL_UPGRADE=1
     fi
     if ((ARG_NO_NOCACHE==1)); then
         NOCACHE=""
