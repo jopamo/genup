@@ -352,19 +352,27 @@ purge_old_distfiles_if_desired() {
 install_new_kernel() {
 	KERNEL_LOCATION="/usr/src/linux"
     eselect kernel set 1
-    mount /boot
-    cp /boot/config* "${KERNEL_LOCATION}"/kernel-config-backup
+
+    if mount | grep /boot > /dev/null; then
+    	show "yay! /boot is already mounted"
+	else
+    	mount /boot
+	fi
+
+	cp "/boot/config*" "${KERNEL_LOCATION}/kernel-config-backup" || \
+		show "no kernel config to copy!"
 
     rm -rf /lib/modules/*
-    rm /boot/*
+    rm -f /boot/* || show "oh well!"
     rm -rf /boot/grub
 
-    ( cd ${KERNEL_LOCATION} && make clean && make prepare && make -j8 && make install && make modules_install )
+    ( cd ${KERNEL_LOCATION} && make clean && make prepare && \
+    	make -j8 && make install && make modules_install || show "no modules to install!" )
 
     mkdir -p /boot/grub/ && grub-mkconfig -o /boot/grub/grub.cfg
-	grub-install /dev/sda || \
-		grub-install --efi-directory=/boot --removable && \
-		grub-install --efi-directory=/boot
+	grub-install /dev/sda || echo "failed installing pc bios"
+	grub-install --efi-directory=/boot --removable || echo "failed installing removable efi bios"
+	grub-install --efi-directory=/boot || echo "failed installing efi bios"
 }
 update_environment() {
     # append values in /etc/env.d/... files into /etc/profile.env
