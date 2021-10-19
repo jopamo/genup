@@ -325,6 +325,10 @@ purge_old_distfiles_if_desired() {
     fi
 }
 install_new_kernel() {
+	if ((ARG_NO_KERNEL_UPGRADE==1)); then
+        return
+    fi
+
 	KERNEL_LOCATION="/usr/src/linux"
     eselect kernel set 1
 
