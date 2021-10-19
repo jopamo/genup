@@ -55,7 +55,6 @@ EMERGE=""
 EMERGEARGS=""
 BUILDKERNEL=""
 BUILDKERNELARGS=""
-EIXSYNCARGS=""
 PUMP=""
 NOPUMP="-distcc -distcc-pump"
 FALLBACK_SENTINEL="/tmp/.full-emptytree-emerge-performed"
@@ -67,16 +66,15 @@ if "${USE_NOCACHE}"; then
     NOCACHE="nocache"
 fi
 declare -i KERNELBUILT=0 KERNELDEPLOYED=0 NEEDSDISPATCHCONF=0
-declare -i WEBRSYNC=0
 # program arguments (booleans in this case)
 declare -i ARG_ASK=0 ARG_DEPLOYFROMSTAGING=0 ARG_HELP=0 ARG_NO_KERNEL_UPGRADE=0
 declare -i ARG_VERBOSE=0 ARG_VERSION=0 ARG_DISPATCHCONF=0
 declare -i ARG_KEEP_OLD_DISTFILES=0
 declare -i ARG_NO_PERL_CLEANER=0
-declare -i ARG_NO_EIX_SYNC=0 ARG_ALERT=0
+declare -i ARG_ALERT=0
 declare -i ARG_IGNORE_REQUIRED_CHANGES=0 ARG_NO_CUSTOM_UPDATERS=0
 declare -i ARG_NO_FIXUPS=0
-declare -i ARG_NO_EIX_METADATA_UPDATE=0 ARG_NO_NOCACHE=0
+declare -i ARG_NO_NOCACHE=0
 declare -i ARG_NO_MODULE_REBUILD=0
 declare -i ADJUSTMENT=19
 # force TERM if none found (e.g. when running from cron)
@@ -170,30 +168,7 @@ display_greeting() {
     show "Gentoo System Updater v${VERSION}"
 }
 update_portage_tree_and_sync_eix() {
-    if ((ARG_NO_EIX_SYNC==0)); then
-        if ((WEBRSYNC==1)); then
-            # eix-sync will ignore other overlays in webrsync-gpg mode, so
-            # force them to update, and do this first, so changes are picked up
-            # by eix-update
-            # NB - make sure you have the "gentoo" overlay set to
-            # auto-sync = no in /etc/portage/repos.conf/gentoo.conf, otherwise
-            # it will also be rsync'd by the below, which is probably not
-            # what you want when webrsync-gpg is in use
-            show "Running emaint sync --auto to update overlays"
-            show "(make sure you have auto-sync = no in gentoo.conf)..."
-            ${NOCACHE} emaint sync --auto
-        fi
-        show "Updating Portage tree and syncing the eix cache"
-        show "(this may take some time)..."
-        # no longer explicitly set -q
-        # (user can still do so via --eix-sync-args)
-        ${NOCACHE} eix-sync -l ${EIXSYNCARGS}
-    else
-        warning "As requested, not performing eix-sync"
-        if ((WEBRSYNC==1)); then
-            warning "(also suppressing emaint sync --auto)"
-        fi
-    fi
+    eix-sync
 }
 remove_any_prior_emerge_resume_history() {
     # as if we call emerge --resume later, we don't want any hangovers from the
@@ -381,15 +356,10 @@ update_environment() {
     env-update
 }
 update_eix_metadata() {
-    # ensure eix metadata is up-to-date (will not be if
-    # only non-gentoo repos have changed in this run)
-    if ((ARG_NO_EIX_METADATA_UPDATE==0)); then
-        # following does not hit the network
-        show "Updating eix metadata..."
-        eix-sync -l -0 |& sed -e '/^Processing/d'
-    else
-        warning "As requested, not updating eix metadata"
-    fi
+	egencache --jobs=8 --update --repo bp
+	emerge --regen
+	emerge --metadata
+	eix-update
 }
 remove_unreferenced_packages() {
     # following should be reasonably safe, it removes any packages that are not
@@ -477,26 +447,17 @@ Options:
   -k, --keep-old-distfiles
                         don't purge source tarballs (distfiles) for uninstalled
                         versions of packages (or uninstalled packages)
-  -m, --no-eix-metadata-update
-                        don't attempt to update eix metadata at the
-                        completion of the run
   -M, --no-module-rebuild
                         don't attempt to rebuild external modules
   -n, --no-kernel-upgrade
                         do not attempt to run buildkernel (implied if
                         buildkernel USE flag has not been set)
-  -N, --no-nocache      do not attempt to use nocache with eix-sync, even
-                        when the nocache USE flag has been set
   -p, --no-perl-cleaner do not attempt to run perl-cleaner
   -r, --adjustment=N    add integer N to the build niceness -20<=N<=19
                         (the default is 19, running builds at lowest possible
                         system priority to avoid slowing the system too much)
-  -S, --no-eix-sync     do not attempt to run emaint sync --auto or eix-sync
   -v, --verbose         ask called programs to display more information
   -V, --version         display the version number of ${PROGNAME} and exit
-  -x, --eix-sync-args=ARGS
-                        pass provided additional ARGS to eix-sync
-                        (e.g. use --eix-sync-args="-q" to suppress output)
 EOF
 }
 print_help() {
@@ -539,16 +500,6 @@ read_portage_features_if_necessary() {
         PORTAGEFEATURES="$(grep '^FEATURES.*$' <<<"${PORTAGEINFO}")"
     fi
 }
-check_if_using_webrsync_gpg() {
-    # we have to amend the args to eix if using webrsync-gpg feature
-    read_portage_features_if_necessary
-    if grep -qi "webrsync-gpg" <<<"${PORTAGEFEATURES}"; then
-        # force use of emerge-webrsync instead of emerge --sync
-        show "Portage feature webrsync-gpg detected: using -w option with eix-sync"
-        EIXSYNCARGS="-w ${EIXSYNCARGS}"
-	    WEBRSYNC=1
-    fi
-}
 check_if_using_distcc() {
     # check for the relevant feature... turn on PUMP prefix if
     # we find it
@@ -564,7 +515,7 @@ process_command_line_options() {
     declare -i RC
     set +e
         # error trapping off, as we want to handle errors
-        TEMP="$(getopt -o aAb:cCde:EFhikmMnNpr:SvVx: --long ask,alert,buildkernel-args:,dispatch-conf,no-custom-updaters,deploy-from-staging,emerge-args:,no-fixups,help,ignore-required-changes,keep-old-distfiles,no-eix-metadata-update,no-module-rebuild,no-kernel-upgrade,no-nocache,no-perl-cleaner,adjustment:,no-eix-sync,verbose,version,eix-sync-args: -n "${PROGNAME}" -- "${@}")"
+        TEMP="$(getopt -o aAb:cCde:EFhikmMnNpr:SvVx: --long ask,alert,buildkernel-args:,dispatch-conf,no-custom-updaters,deploy-from-staging,emerge-args:,no-fixups,help,ignore-required-changes,keep-old-distfiles,no-module-rebuild,no-kernel-upgrade,no-nocache,no-perl-cleaner,adjustment:,verbose,version: -n "${PROGNAME}" -- "${@}")"
         RC="${?}"
     set -e
     if ((RC!=0)); then
@@ -594,7 +545,6 @@ process_command_line_options() {
             -h|--help) ARG_HELP=1 ; shift ;;
             -i|--ignore-required-changes) ARG_IGNORE_REQUIRED_CHANGES=1 ; shift ;;
             -k|--keep-old-distfiles) ARG_KEEP_OLD_DISTFILES=1 ; shift ;;
-            -m|--no-eix-metadata-update) ARG_NO_EIX_METADATA_UPDATE=1 ; shift ;;
             -M|--no-module-rebuild) ARG_NO_MODULE_REBUILD=1 ; shift ;;
             -n|--no-kernel-upgrade) ARG_NO_KERNEL_UPGRADE=1 ; shift ;;
             -N|--no-nocache) ARG_NO_NOCACHE=1 ; shift ;;
@@ -604,14 +554,8 @@ process_command_line_options() {
                     "") shift 2 ;;
                     *) ADJUSTMENT="${2}" ; shift 2 ;;
                 esac ;;
-            -S|--no-eix-sync) ARG_NO_EIX_SYNC=1 ; shift ;;
             -v|--verbose) ARG_VERBOSE=1 ; shift ;;
             -V|--version) ARG_VERSION=1 ; shift ;;
-            -x|--eix-sync-args)
-                case "${2}" in
-                    "") shift 2 ;;
-                    *) EIXSYNCARGS="${2}" ; shift 2 ;;
-                esac ;;
             --) shift ; break ;;
             *) die "Internal error!" ;;
         esac
@@ -657,7 +601,6 @@ process_command_line_options() {
 suppress_colour_and_alert_if_output_not_to_a_terminal
 set_idle_io_priority
 process_command_line_options "${@}"
-#check_if_using_webrsync_gpg
 #check_if_using_distcc
 display_greeting
 update_portage_tree_and_sync_eix
