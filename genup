@@ -48,9 +48,6 @@ SHOWSUFFIX=""
 # following variable is conformed on installation by ebuild
 # (to reflect setting of "buildkernel" USE flag)
 USE_BUILDKERNEL=false
-# following variable is conformed on installation by ebuild
-# (to reflect setting of "emtee" USE flag)
-USE_EMTEE=false
 VERBOSITYFLAG=""
 ASKFLAG=""
 ALERTFLAG=""
@@ -342,35 +339,6 @@ interactively_resolve_clashing_config_file_changes() {
         show "No configuration files need updating"
     fi
 }
-offer_kernel_upgrade_to_staging_if_available() {
-    # we may have been instructed not to do this...
-    if ((ARG_NO_KERNEL_UPGRADE==1)); then
-        return
-    fi
-    local CURRENT_KV="$(readlink /usr/src/linux)"
-    local LATEST_KV_LINE="$(eselect kernel list | tail -n 1)"
-    local LATEST_KV="$(awk '{print $2}' <<< ${LATEST_KV_LINE})"
-    local LATEST_KV_INDEX="$(cut -d '[' -f 2 <<< ${LATEST_KV_LINE} | cut -d ']' -f 1)"
-    if ! grep -q '*' <<< "${LATEST_KV_LINE}"; then
-        show "A kernel upgrade is available! You are running ${CURRENT_KV}"
-        if ((ARG_ASK==0)) || test_yn "Would you like to upgrade to ${LATEST_KV}"; then
-            show "Setting up new kernel in staging..."
-            eselect kernel set "${LATEST_KV_INDEX}"
-            show "Entering buildkernel..."
-            # following does not require your USB key to be inserted, as it
-            # only builds to staging in /boot...
-            ${BUILDKERNEL} ${ASKFLAG} ${ALERTFLAG} ${VERBOSITYFLAG} ${BUILDKERNELARGS} --stage-only
-            KERNELBUILT=1
-        else
-            show "OK, leaving your kernel as is, to upgrade subsequently, issue:"
-            show "  eselect kernel list"
-            show "  eselect kernel set <n>"
-            show "  buildkernel"
-        fi
-    else
-        show "Your kernel (${CURRENT_KV}) is the latest version available!"
-    fi
-}
 purge_old_distfiles_if_desired() {
     # by default, Portage keeps old source tarballs (distfiles) around
     # forever (in /usr/portage/distfiles); the following command, from the
@@ -381,24 +349,22 @@ purge_old_distfiles_if_desired() {
         eclean ${VERBOSITYFLAG} --deep distfiles
     fi
 }
-copy_new_kernel_from_staging_if_present_and_desired() {
-    declare -i DO_KERNELDEPLOY=0
-    if ((KERNELBUILT==1)); then
-        # we successfully built a new kernel to staging, now deploy it
-        # if the user wishes to
-        if ((ARG_DEPLOYFROMSTAGING==1)); then
-            DO_KERNELDEPLOY=1
-        elif ((ARG_ASK==1)); then
-            if test_yn "Would you like to copy your new kernel to the EFI system partition?"; then
-                DO_KERNELDEPLOY=1
-            fi
-        fi
-        if ((DO_KERNELDEPLOY==1)); then
-            show "Copying new kernel from staging..."
-            buildkernel ${ASKFLAG} ${ALERTFLAG} ${VERBOSITYFLAG} --copy-from-staging
-            KERNELDEPLOYED=1
-        fi
-    fi
+install_new_kernel() {
+	KERNEL_LOCATION="/usr/src/linux"
+    eselect kernel set 1
+    mount /boot
+    cp /boot/config* "${KERNEL_LOCATION}"/kernel-config-backup
+
+    rm -rf /lib/modules/*
+    rm /boot/*
+    rm -rf /boot/grub
+
+    ( cd ${KERNEL_LOCATION} && make clean && make prepare && make -j8 && make install && make modules_install )
+
+    mkdir -p /boot/grub/ && grub-mkconfig -o /boot/grub/grub.cfg
+	grub-install /dev/sda || \
+		grub-install --efi-directory=/boot --removable && \
+		grub-install --efi-directory=/boot
 }
 update_environment() {
     # append values in /etc/env.d/... files into /etc/profile.env
@@ -457,14 +423,6 @@ display_final_status() {
     if ((NEEDSDISPATCHCONF==1)); then
         warning "There are configuration file changes pending review!"
         warning "Please run dispatch-conf to interactively resolve them."
-        if "${USE_EMTEE}" && [[ -f "${FALLBACK_SENTINEL}" ]]; then
-            rm -f "${FALLBACK_SENTINEL}"
-            warning "  TAKE CARE: a full --emptytree @world emerge has been performed;"
-            warning "  you may need to retain your current version of many"
-            warning "  configuration files - when prompted by dispatch-conf - to"
-            warning "  retain full system functionality!"
-            warning "  (use the 'z' / 'zap new' option where unsure)"
-        fi
     else
         show "There are no configuration file changes pending review."
     fi
@@ -499,8 +457,6 @@ Options:
                         pass provided additional ARGS to the main emerge
                         e.g., use --emerge-args='--autounmask-write' to
                         automatically make necessary changes to config files
-  -E, --no-emtee        don't attempt to use the emtee tool, even when the
-                        eponymous USE flag has been enabled
   -F, --no-fixups
                         do not attempt to run /etc/cron.weekly/fixup, even
                         where this file is present and executable (fixups
@@ -600,7 +556,7 @@ process_command_line_options() {
     declare -i RC
     set +e
         # error trapping off, as we want to handle errors
-        TEMP="$(getopt -o aAb:cCde:EFhikmMnNpr:SvVx: --long ask,alert,buildkernel-args:,dispatch-conf,no-custom-updaters,deploy-from-staging,emerge-args:,no-emtee,no-fixups,help,ignore-required-changes,keep-old-distfiles,no-eix-metadata-update,no-module-rebuild,no-kernel-upgrade,no-nocache,no-perl-cleaner,adjustment:,no-eix-sync,verbose,version,eix-sync-args: -n "${PROGNAME}" -- "${@}")"
+        TEMP="$(getopt -o aAb:cCde:EFhikmMnNpr:SvVx: --long ask,alert,buildkernel-args:,dispatch-conf,no-custom-updaters,deploy-from-staging,emerge-args:,no-fixups,help,ignore-required-changes,keep-old-distfiles,no-eix-metadata-update,no-module-rebuild,no-kernel-upgrade,no-nocache,no-perl-cleaner,adjustment:,no-eix-sync,verbose,version,eix-sync-args: -n "${PROGNAME}" -- "${@}")"
         RC="${?}"
     set -e
     if ((RC!=0)); then
@@ -626,7 +582,6 @@ process_command_line_options() {
                     "") shift 2 ;;
                     *) EMERGEARGS="${2}" ; shift 2 ;;
                 esac ;;
-            -E|--no-emtee) USE_EMTEE=false ; shift ;;
             -F|--no-fixups) ARG_NO_FIXUPS=1 ; shift ;;
             -h|--help) ARG_HELP=1 ; shift ;;
             -i|--ignore-required-changes) ARG_IGNORE_REQUIRED_CHANGES=1 ; shift ;;
@@ -703,16 +658,15 @@ run_fixups_if_present
 ensure_portage_itself_is_up_to_date
 update_all_packages_in_world_set_and_dependencies
 remove_unreferenced_packages
-#rebuild_external_modules_if_necessary
 rebuild_packages_depending_on_stale_libraries
 #bring_old_perl_modules_up_to_date
 #interactively_resolve_clashing_config_file_changes
-#offer_kernel_upgrade_to_staging_if_available
 remove_unreferenced_packages
 #rebuild_where_missing_libraries_detected
 rebuild_packages_depending_on_stale_libraries
-purge_old_distfiles_if_desired
-#copy_new_kernel_from_staging_if_present_and_desired
+#urge_old_distfiles_if_desired
+install_new_kernel
+rebuild_external_modules_if_necessary
 update_environment
 update_eix_metadata
 run_custom_updaters_if_present
