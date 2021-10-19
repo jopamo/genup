@@ -67,7 +67,7 @@ if "${USE_NOCACHE}"; then
 fi
 declare -i KERNELBUILT=0 KERNELDEPLOYED=0 NEEDSDISPATCHCONF=0
 # program arguments (booleans in this case)
-declare -i ARG_ASK=0 ARG_DEPLOYFROMSTAGING=0 ARG_HELP=0 ARG_NO_KERNEL_UPGRADE=0
+declare -i ARG_ASK=0 ARG_DEPLOYFROMSTAGING=0 ARG_HELP=0 ARG_KERNEL_UPGRADE=0
 declare -i ARG_VERBOSE=0 ARG_VERSION=0 ARG_DISPATCHCONF=0
 declare -i ARG_KEEP_OLD_DISTFILES=0
 declare -i ARG_NO_PERL_CLEANER=0
@@ -75,7 +75,6 @@ declare -i ARG_ALERT=0
 declare -i ARG_IGNORE_REQUIRED_CHANGES=0 ARG_NO_CUSTOM_UPDATERS=0
 declare -i ARG_NO_FIXUPS=0
 declare -i ARG_NO_NOCACHE=0
-declare -i ARG_NO_MODULE_REBUILD=0
 declare -i ADJUSTMENT=19
 # force TERM if none found (e.g. when running from cron)
 # otherwise mach builds (firefox etc.) will fail
@@ -189,23 +188,22 @@ update_all_packages_in_world_set_and_dependencies() {
     ${EMERGE} -1 --keep-going @smart-live-rebuild
 }
 rebuild_external_modules_if_necessary() {
-    if ((ARG_NO_MODULE_REBUILD==1)); then
-        return
-    fi
-    show "Creating any necessary external modules (e.g., VirtualBox)..."
-    # exclude packages ending in '-bin'... by convention, these are binary
-    # packages which means they aren't going to rebuild anything
-    # (and may even be binary kernel packages, swept up into the
-    # @module-rebuild set as they 'own' kernel modules in
-    # /lib/modules/<release>/...)
-    if ! ${PUMP} ${EMERGE} ${VERBOSITYFLAG} @module-rebuild --exclude '*-bin'; then
-        if MAKEOPTS="${MAKEOPTS-} -j1" FEATURES="${NOPUMP}" ${EMERGE} --resume; then
-            warning "emerge @module-rebuild completed successfully, but only by restricting"
-            warning "build parallelism and distcc"
-        else
-            warning "Failed to complete emerge @module-rebuild due to error"
-            warning "Continuing..."
-        fi
+    if ((ARG_KERNEL_UPGRADE==1)); then
+    	show "Creating any necessary external modules (e.g., VirtualBox)..."
+    	# exclude packages ending in '-bin'... by convention, these are binary
+    	# packages which means they aren't going to rebuild anything
+    	# (and may even be binary kernel packages, swept up into the
+    	# @module-rebuild set as they 'own' kernel modules in
+    	# /lib/modules/<release>/...)
+    	if ! ${PUMP} ${EMERGE} ${VERBOSITYFLAG} @module-rebuild --exclude '*-bin'; then
+        	if MAKEOPTS="${MAKEOPTS-} -j1" FEATURES="${NOPUMP}" ${EMERGE} --resume; then
+            	warning "emerge @module-rebuild completed successfully, but only by restricting"
+            	warning "build parallelism and distcc"
+        	else
+            	warning "Failed to complete emerge @module-rebuild due to error"
+            	warning "Continuing..."
+        	fi
+    	fi
     fi
 }
 rebuild_packages_depending_on_stale_libraries() {
@@ -325,33 +323,31 @@ purge_old_distfiles_if_desired() {
     fi
 }
 install_new_kernel() {
-	if ((ARG_NO_KERNEL_UPGRADE==1)); then
-        return
-    fi
+	if ((ARG_KERNEL_UPGRADE==1)); then
+		KERNEL_LOCATION="/usr/src/linux"
+    	eselect kernel set 1
 
-	KERNEL_LOCATION="/usr/src/linux"
-    eselect kernel set 1
+    	if mount | grep /boot > /dev/null; then
+    		show "yay! /boot is already mounted"
+		else
+    		mount /boot
+		fi
 
-    if mount | grep /boot > /dev/null; then
-    	show "yay! /boot is already mounted"
-	else
-    	mount /boot
+		cp "/boot/config*" "${KERNEL_LOCATION}/kernel-config-backup" || \
+			show "no kernel config to copy!"
+
+    	rm -rf /lib/modules/*
+    	rm -f /boot/* || show "oh well!"
+    	rm -rf /boot/grub
+
+    	( cd ${KERNEL_LOCATION} && make clean && make prepare && \
+    		make -j8 && make install && make modules_install || show "no modules to install!" )
+
+    	mkdir -p /boot/grub/ && grub-mkconfig -o /boot/grub/grub.cfg
+		grub-install /dev/sda || echo "failed installing pc bios"
+		grub-install --efi-directory=/boot --removable || echo "failed installing removable efi bios"
+		grub-install --efi-directory=/boot || echo "failed installing efi bios"
 	fi
-
-	cp "/boot/config*" "${KERNEL_LOCATION}/kernel-config-backup" || \
-		show "no kernel config to copy!"
-
-    rm -rf /lib/modules/*
-    rm -f /boot/* || show "oh well!"
-    rm -rf /boot/grub
-
-    ( cd ${KERNEL_LOCATION} && make clean && make prepare && \
-    	make -j8 && make install && make modules_install || show "no modules to install!" )
-
-    mkdir -p /boot/grub/ && grub-mkconfig -o /boot/grub/grub.cfg
-	grub-install /dev/sda || echo "failed installing pc bios"
-	grub-install --efi-directory=/boot --removable || echo "failed installing removable efi bios"
-	grub-install --efi-directory=/boot || echo "failed installing efi bios"
 }
 update_environment() {
     # append values in /etc/env.d/... files into /etc/profile.env
@@ -389,7 +385,7 @@ display_final_status() {
             show "You can install it to your EFI system partition by issuing:"
             show "  buildkernel --copy-from-staging"
         fi
-    elif ((ARG_NO_KERNEL_UPGRADE==0)); then
+    elif ((ARG_KERNEL_UPGRADE==0)); then
         if buildkernel --is-new-kernel-available; then
             warning "You are currently running with an older kernel"
             warning "When ready, ensure you have copied the new version"
@@ -451,11 +447,8 @@ Options:
   -k, --keep-old-distfiles
                         don't purge source tarballs (distfiles) for uninstalled
                         versions of packages (or uninstalled packages)
-  -M, --no-module-rebuild
-                        don't attempt to rebuild external modules
-  -n, --no-kernel-upgrade
-                        do not attempt to run buildkernel (implied if
-                        buildkernel USE flag has not been set)
+  -n, --kernel-upgrade
+                        attempt to build kernel
   -p, --no-perl-cleaner do not attempt to run perl-cleaner
   -r, --adjustment=N    add integer N to the build niceness -20<=N<=19
                         (the default is 19, running builds at lowest possible
@@ -482,11 +475,11 @@ display_usage_message_and_bail_out() {
 }
 internal_consistency_option_checks() {
     # following not exhaustive, just some more obvious snafus
-    local KERNMSG="--no-kernel-upgrade"
+    local KERNMSG="--kernel-upgrade"
     if ! "${USE_BUILDKERNEL}"; then
         KERNMSG="buildkernel USE flag unset"
     fi
-    if ((ARG_NO_KERNEL_UPGRADE==1)) || ! "${USE_BUILDKERNEL}"; then
+    if ((ARG_KERNEL_UPGRADE==1)) || ! "${USE_BUILDKERNEL}"; then
         if [[ -n "${BUILDKERNELARGS}" ]]; then
             display_usage_message_and_bail_out "cannot specify --buildkernel-args with ${KERNMSG}"
         fi
@@ -519,7 +512,7 @@ process_command_line_options() {
     declare -i RC
     set +e
         # error trapping off, as we want to handle errors
-        TEMP="$(getopt -o aAb:cCde:EFhikmMnNpr:SvVx: --long ask,alert,buildkernel-args:,dispatch-conf,no-custom-updaters,deploy-from-staging,emerge-args:,no-fixups,help,ignore-required-changes,keep-old-distfiles,no-module-rebuild,no-kernel-upgrade,no-nocache,no-perl-cleaner,adjustment:,verbose,version: -n "${PROGNAME}" -- "${@}")"
+        TEMP="$(getopt -o aAb:cCde:EFhikmMnNpr:SvVx: --long ask,alert,buildkernel-args:,dispatch-conf,no-custom-updaters,deploy-from-staging,emerge-args:,no-fixups,help,ignore-required-changes,keep-old-distfiles,kernel-upgrade,no-nocache,no-perl-cleaner,adjustment:,verbose,version: -n "${PROGNAME}" -- "${@}")"
         RC="${?}"
     set -e
     if ((RC!=0)); then
@@ -549,8 +542,7 @@ process_command_line_options() {
             -h|--help) ARG_HELP=1 ; shift ;;
             -i|--ignore-required-changes) ARG_IGNORE_REQUIRED_CHANGES=1 ; shift ;;
             -k|--keep-old-distfiles) ARG_KEEP_OLD_DISTFILES=1 ; shift ;;
-            -M|--no-module-rebuild) ARG_NO_MODULE_REBUILD=1 ; shift ;;
-            -n|--no-kernel-upgrade) ARG_NO_KERNEL_UPGRADE=1 ; shift ;;
+            -n|--kernel-upgrade) ARG_KERNEL_UPGRADE=1 ; shift ;;
             -N|--no-nocache) ARG_NO_NOCACHE=1 ; shift ;;
             -p|--no-perl-cleaner) ARG_NO_PERL_CLEANER=1 ; shift ;;
             -r|--adjustment)
@@ -593,7 +585,7 @@ process_command_line_options() {
     fi
     # force 'no kernel upgrade' mode if buildkernel USE flag not set
     if ! "${USE_BUILDKERNEL}"; then
-        ARG_NO_KERNEL_UPGRADE=1
+        ARG_KERNEL_UPGRADE=1
     fi
     if ((ARG_NO_NOCACHE==1)); then
         NOCACHE=""
